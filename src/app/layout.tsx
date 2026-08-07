@@ -33,13 +33,6 @@ export const metadata: Metadata = {
     template: "%s | Music Left Behind",
   },
   description: "The greatest songs you never heard.",
-  openGraph: {
-    siteName: "Music Left Behind",
-    type: "website",
-  },
-  twitter: {
-    card: "summary_large_image",
-  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
