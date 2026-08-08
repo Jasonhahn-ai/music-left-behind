@@ -10,6 +10,14 @@
 // isolation headers required) loaded same-origin from public/ffmpeg/.
 import type { FFmpeg } from "@ffmpeg/ffmpeg";
 
+// ffmpeg.wasm decodes/encodes the whole file in one shot in the WASM
+// heap, with input, decoded PCM, and output all resident at once. Past
+// this size the tab risks a hard out-of-memory crash rather than a
+// catchable error (worst case observed: long uncompressed WAV uploads).
+// Above the cap we skip transcoding entirely and let the caller fall
+// back to uploading the original file.
+export const MAX_TRANSCODE_INPUT_BYTES = 200 * 1024 * 1024; // 200MB
+
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 
 async function getFFmpeg(): Promise<FFmpeg> {
@@ -33,6 +41,12 @@ export async function transcodeToMp3(
   file: File,
   onProgress?: (ratio: number) => void,
 ): Promise<File> {
+  if (file.size > MAX_TRANSCODE_INPUT_BYTES) {
+    throw new TranscodeError(
+      `File is ${Math.round(file.size / (1024 * 1024))}MB, over the ${MAX_TRANSCODE_INPUT_BYTES / (1024 * 1024)}MB in-browser transcode limit.`,
+    );
+  }
+
   const { fetchFile } = await import("@ffmpeg/util");
   const ffmpeg = await getFFmpeg();
 
