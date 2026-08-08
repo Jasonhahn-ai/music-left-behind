@@ -1,8 +1,9 @@
 "use client";
 
-import { useActionState, useEffect, useRef } from "react";
+import { startTransition, useActionState, useEffect, useRef, useState } from "react";
 import { uploadSong, type UploadFormState } from "./actions";
 import { SONG_TAGS } from "@/lib/tags";
+import { transcodeToMp3 } from "@/lib/transcode-audio";
 
 const initialState: UploadFormState = { error: null, success: false };
 
@@ -12,6 +13,8 @@ const inputClass =
 export function UploadForm() {
   const [state, formAction, pending] = useActionState(uploadSong, initialState);
   const formRef = useRef<HTMLFormElement>(null);
+  const [transcoding, setTranscoding] = useState(false);
+  const [transcodeProgress, setTranscodeProgress] = useState(0);
 
   useEffect(() => {
     if (state.success) {
@@ -19,10 +22,36 @@ export function UploadForm() {
     }
   }, [state.success]);
 
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const audioFile = formData.get("audio");
+
+    if (audioFile instanceof File && audioFile.size > 0) {
+      setTranscoding(true);
+      setTranscodeProgress(0);
+      try {
+        const mp3File = await transcodeToMp3(audioFile, setTranscodeProgress);
+        formData.set("audio", mp3File);
+      } catch {
+        // Best-effort optimization: if in-browser transcoding fails (e.g.
+        // an unsupported browser), fall back to uploading the original
+        // file untouched. The server-side layer check is still the safety
+        // net for anything that turns out to be genuinely unplayable.
+      } finally {
+        setTranscoding(false);
+      }
+    }
+
+    startTransition(() => {
+      formAction(formData);
+    });
+  }
+
   return (
     <form
       ref={formRef}
-      action={formAction}
+      onSubmit={handleSubmit}
       className="flex w-full max-w-lg flex-col gap-4 rounded-2xl border border-card-border bg-card p-8 shadow-[0_0_90px_-25px_var(--accent-glow),0_30px_70px_-20px_rgba(0,0,0,0.7)]"
     >
       <div className="flex flex-col gap-1">
@@ -85,6 +114,9 @@ export function UploadForm() {
           required
           className="text-sm text-muted file:mr-3 file:rounded-full file:border-0 file:bg-accent file:px-4 file:py-1.5 file:text-sm file:font-medium file:text-accent-ink hover:file:bg-accent-strong"
         />
+        <span className="text-xs text-muted/70">
+          MP3, WAV, M4A, AAC, OGG, and more -- we&apos;ll automatically prepare it for playback.
+        </span>
       </div>
 
       <div className="flex flex-col gap-1">
@@ -107,10 +139,14 @@ export function UploadForm() {
 
       <button
         type="submit"
-        disabled={pending}
+        disabled={transcoding || pending}
         className="rounded-full bg-accent px-5 py-2 font-medium text-accent-ink shadow-[0_0_30px_-8px_var(--accent-glow)] transition-colors hover:bg-accent-strong disabled:opacity-40"
       >
-        {pending ? "Uploading..." : "Upload song"}
+        {transcoding
+          ? `Preparing your song... ${Math.round(transcodeProgress * 100)}%`
+          : pending
+            ? "Uploading..."
+            : "Upload song"}
       </button>
     </form>
   );
