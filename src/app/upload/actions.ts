@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { isSongTag } from "@/lib/tags";
+import { detectMpegLayer } from "@/lib/mpeg-audio";
 
 export type UploadFormState = {
   error: string | null;
@@ -40,6 +41,15 @@ export async function uploadSong(
   }
   if (!audioFile || audioFile.size === 0) {
     return { error: "An audio file is required.", success: false };
+  }
+
+  const audioHeaderChunk = await audioFile.slice(0, 64 * 1024).arrayBuffer();
+  const mpegLayer = detectMpegLayer(audioHeaderChunk);
+  if (mpegLayer !== null && mpegLayer !== 3) {
+    return {
+      error: `This file is encoded as MPEG Layer ${mpegLayer === 1 ? "I" : "II"}, not MP3 (Layer III) -- browsers can't play it even though it's named or typed as MP3. Re-encode it as a standard MP3 and try again.`,
+      success: false,
+    };
   }
 
   const audioPath = `${user.id}/${crypto.randomUUID()}.${extensionOf(audioFile.name)}`;
