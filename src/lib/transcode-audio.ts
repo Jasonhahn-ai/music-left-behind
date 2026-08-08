@@ -8,7 +8,6 @@
 // both are just "not yet the canonical format" to this pipeline, handled the
 // same way. Runs the single-threaded @ffmpeg/core build (no cross-origin
 // isolation headers required) loaded same-origin from public/ffmpeg/.
-import type { FFmpeg } from "@ffmpeg/ffmpeg";
 
 // ffmpeg.wasm decodes/encodes the whole file in one shot in the WASM
 // heap, with input, decoded PCM, and output all resident at once. Past
@@ -17,23 +16,6 @@ import type { FFmpeg } from "@ffmpeg/ffmpeg";
 // Above the cap we skip transcoding entirely and let the caller fall
 // back to uploading the original file.
 export const MAX_TRANSCODE_INPUT_BYTES = 200 * 1024 * 1024; // 200MB
-
-let ffmpegPromise: Promise<FFmpeg> | null = null;
-
-async function getFFmpeg(): Promise<FFmpeg> {
-  if (!ffmpegPromise) {
-    ffmpegPromise = (async () => {
-      const { FFmpeg } = await import("@ffmpeg/ffmpeg");
-      const ffmpeg = new FFmpeg();
-      await ffmpeg.load({
-        coreURL: "/ffmpeg/ffmpeg-core.js",
-        wasmURL: "/ffmpeg/ffmpeg-core.wasm",
-      });
-      return ffmpeg;
-    })();
-  }
-  return ffmpegPromise;
-}
 
 export class TranscodeError extends Error {}
 
@@ -47,8 +29,19 @@ export async function transcodeToMp3(
     );
   }
 
+  const { FFmpeg } = await import("@ffmpeg/ffmpeg");
   const { fetchFile } = await import("@ffmpeg/util");
-  const ffmpeg = await getFFmpeg();
+
+  // A fresh instance per call, torn down with terminate() when done:
+  // ffmpeg.wasm's WASM linear memory only ever grows, never shrinks, so
+  // a long-lived shared instance (the previous approach) accumulates
+  // memory across every upload attempted in the tab's lifetime and
+  // never releases it -- eventually crashing the tab even on a small,
+  // perfectly valid file, if it wasn't the first transcode in that
+  // session. terminate() destroys the worker (and its memory) outright;
+  // the reload cost on the next call is small since the core assets are
+  // already cached same-origin.
+  const ffmpeg = new FFmpeg();
 
   const jobId = crypto.randomUUID();
   const inputName = `${jobId}-input`;
@@ -60,6 +53,10 @@ export async function transcodeToMp3(
   ffmpeg.on("progress", handleProgress);
 
   try {
+    await ffmpeg.load({
+      coreURL: "/ffmpeg/ffmpeg-core.js",
+      wasmURL: "/ffmpeg/ffmpeg-core.wasm",
+    });
     await ffmpeg.writeFile(inputName, await fetchFile(file));
 
     // -vn: drop any video/artwork stream some containers (e.g. M4A) embed.
@@ -90,6 +87,6 @@ export async function transcodeToMp3(
     return new File([bytes], `${baseName}.mp3`, { type: "audio/mpeg" });
   } finally {
     ffmpeg.off("progress", handleProgress);
-    await Promise.allSettled([ffmpeg.deleteFile(inputName), ffmpeg.deleteFile(outputName)]);
+    ffmpeg.terminate();
   }
 }
