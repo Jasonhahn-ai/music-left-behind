@@ -23,6 +23,18 @@ export async function uploadSong(
     return { error: "You must be logged in to upload a song.", success: false };
   }
 
+  const { data: agreement } = await supabase
+    .from("user_agreements")
+    .select("user_id")
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (!agreement) {
+    return {
+      error: "You must accept the upload terms before publishing a song.",
+      success: false,
+    };
+  }
+
   const title = (formData.get("title") as string)?.trim();
   const artistName = (formData.get("artist_name") as string)?.trim();
   const story = (formData.get("story") as string)?.trim() || null;
