@@ -3,16 +3,12 @@
 import { createClient } from "@/lib/supabase/server";
 import { isSongTag } from "@/lib/tags";
 import { detectMpegLayer } from "@/lib/mpeg-audio";
+import { isOwnedPath } from "@/lib/storage-paths";
 
 export type UploadFormState = {
   error: string | null;
   success: boolean;
 };
-
-function extensionOf(filename: string): string {
-  const parts = filename.split(".");
-  return parts.length > 1 ? parts.pop()! : "bin";
-}
 
 export async function uploadSong(
   _prevState: UploadFormState,
@@ -30,8 +26,8 @@ export async function uploadSong(
   const title = (formData.get("title") as string)?.trim();
   const artistName = (formData.get("artist_name") as string)?.trim();
   const story = (formData.get("story") as string)?.trim() || null;
-  const audioFile = formData.get("audio") as File | null;
-  const artworkFile = formData.get("artwork") as File | null;
+  const audioPath = formData.get("audio_path") as string | null;
+  const artworkPath = (formData.get("artwork_path") as string) || null;
   const tags = formData.getAll("tags").filter(
     (value): value is string => typeof value === "string" && isSongTag(value),
   );
@@ -39,46 +35,35 @@ export async function uploadSong(
   if (!title || !artistName) {
     return { error: "Title and artist name are required.", success: false };
   }
-  if (!audioFile || audioFile.size === 0) {
+  // The browser uploads the audio/artwork bytes straight to Supabase Storage
+  // before calling this action (Vercel's Serverless Function body limit is
+  // far below what a full song file needs) -- this only ever sees the
+  // resulting storage paths.
+  if (!audioPath) {
     return { error: "An audio file is required.", success: false };
   }
+  if (!isOwnedPath(user.id, audioPath) || (artworkPath && !isOwnedPath(user.id, artworkPath))) {
+    return { error: "Invalid file reference.", success: false };
+  }
 
-  const audioHeaderChunk = await audioFile.slice(0, 64 * 1024).arrayBuffer();
+  const cleanupPaths = artworkPath ? [audioPath, artworkPath] : [audioPath];
+
+  const { data: publicAudio } = supabase.storage.from("songs").getPublicUrl(audioPath);
+  const headResponse = await fetch(publicAudio.publicUrl, {
+    headers: { Range: "bytes=0-65535" },
+  });
+  if (!headResponse.ok) {
+    await supabase.storage.from("songs").remove(cleanupPaths);
+    return { error: "Could not verify the uploaded audio file.", success: false };
+  }
+  const audioHeaderChunk = await headResponse.arrayBuffer();
   const mpegLayer = detectMpegLayer(audioHeaderChunk);
   if (mpegLayer !== null && mpegLayer !== 3) {
+    await supabase.storage.from("songs").remove(cleanupPaths);
     return {
       error: `This file is encoded as MPEG Layer ${mpegLayer === 1 ? "I" : "II"}, not MP3 (Layer III) -- browsers can't play it even though it's named or typed as MP3. Re-encode it as a standard MP3 and try again.`,
       success: false,
     };
-  }
-
-  const audioPath = `${user.id}/${crypto.randomUUID()}.${extensionOf(audioFile.name)}`;
-  const { error: audioError } = await supabase.storage
-    .from("songs")
-    .upload(audioPath, audioFile, {
-      contentType: audioFile.type || "audio/mpeg",
-    });
-
-  if (audioError) {
-    return { error: `Audio upload failed: ${audioError.message}`, success: false };
-  }
-
-  let artworkPath: string | null = null;
-  if (artworkFile && artworkFile.size > 0) {
-    artworkPath = `${user.id}/${crypto.randomUUID()}.${extensionOf(artworkFile.name)}`;
-    const { error: artworkError } = await supabase.storage
-      .from("songs")
-      .upload(artworkPath, artworkFile, {
-        contentType: artworkFile.type || "image/jpeg",
-      });
-
-    if (artworkError) {
-      await supabase.storage.from("songs").remove([audioPath]);
-      return {
-        error: `Artwork upload failed: ${artworkError.message}`,
-        success: false,
-      };
-    }
   }
 
   const { error: insertError } = await supabase.from("songs").insert({
@@ -92,8 +77,7 @@ export async function uploadSong(
   });
 
   if (insertError) {
-    const pathsToRemove = artworkPath ? [audioPath, artworkPath] : [audioPath];
-    await supabase.storage.from("songs").remove(pathsToRemove);
+    await supabase.storage.from("songs").remove(cleanupPaths);
     return { error: `Could not save song: ${insertError.message}`, success: false };
   }
 

@@ -4,17 +4,21 @@ import { startTransition, useActionState, useEffect, useRef, useState } from "re
 import { uploadSong, type UploadFormState } from "./actions";
 import { SONG_TAGS } from "@/lib/tags";
 import { transcodeToMp3 } from "@/lib/transcode-audio";
+import { createClient } from "@/lib/supabase/client";
+import { songStoragePath } from "@/lib/storage-paths";
 
 const initialState: UploadFormState = { error: null, success: false };
 
 const inputClass =
   "rounded-lg border border-card-border bg-black/30 px-3 py-2 text-foreground outline-none transition-colors focus:border-accent focus:ring-1 focus:ring-accent";
 
-export function UploadForm() {
+export function UploadForm({ userId }: { userId: string }) {
   const [state, formAction, pending] = useActionState(uploadSong, initialState);
   const formRef = useRef<HTMLFormElement>(null);
   const [transcoding, setTranscoding] = useState(false);
   const [transcodeProgress, setTranscodeProgress] = useState(0);
+  const [storingFiles, setStoringFiles] = useState(false);
+  const [clientError, setClientError] = useState<string | null>(null);
 
   useEffect(() => {
     if (state.success) {
@@ -24,28 +28,75 @@ export function UploadForm() {
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setClientError(null);
     const formData = new FormData(event.currentTarget);
     const audioFile = formData.get("audio");
+    const artworkFile = formData.get("artwork");
 
-    if (audioFile instanceof File && audioFile.size > 0) {
-      setTranscoding(true);
-      setTranscodeProgress(0);
-      try {
-        const mp3File = await transcodeToMp3(audioFile, setTranscodeProgress);
-        formData.set("audio", mp3File);
-      } catch {
-        // Best-effort optimization: if in-browser transcoding fails (e.g.
-        // an unsupported browser), fall back to uploading the original
-        // file untouched. The server-side layer check is still the safety
-        // net for anything that turns out to be genuinely unplayable.
-      } finally {
-        setTranscoding(false);
-      }
+    if (!(audioFile instanceof File) || audioFile.size === 0) {
+      return;
     }
 
-    startTransition(() => {
-      formAction(formData);
-    });
+    let uploadFile = audioFile;
+    setTranscoding(true);
+    setTranscodeProgress(0);
+    try {
+      uploadFile = await transcodeToMp3(audioFile, setTranscodeProgress);
+    } catch {
+      // Best-effort optimization: if in-browser transcoding fails (e.g.
+      // an unsupported browser), fall back to uploading the original
+      // file untouched. The server-side layer check is still the safety
+      // net for anything that turns out to be genuinely unplayable.
+    } finally {
+      setTranscoding(false);
+    }
+
+    // Uploaded directly to Supabase Storage from the browser, bypassing our
+    // own server entirely -- Vercel's Serverless Function body limit (a hard
+    // platform ceiling, well below what a full song file needs) sits in
+    // front of the Server Action and would 413 anything sizeable.
+    setStoringFiles(true);
+    const supabase = createClient();
+    const audioPath = songStoragePath(userId, uploadFile.name);
+    const uploadedPaths: string[] = [];
+    try {
+      const { error: audioError } = await supabase.storage
+        .from("songs")
+        .upload(audioPath, uploadFile, { contentType: uploadFile.type || "audio/mpeg" });
+      if (audioError) {
+        setClientError(`Audio upload failed: ${audioError.message}`);
+        return;
+      }
+      uploadedPaths.push(audioPath);
+
+      let artworkPath: string | null = null;
+      if (artworkFile instanceof File && artworkFile.size > 0) {
+        artworkPath = songStoragePath(userId, artworkFile.name);
+        const { error: artworkError } = await supabase.storage
+          .from("songs")
+          .upload(artworkPath, artworkFile, { contentType: artworkFile.type || "image/jpeg" });
+        if (artworkError) {
+          await supabase.storage.from("songs").remove(uploadedPaths);
+          setClientError(`Artwork upload failed: ${artworkError.message}`);
+          return;
+        }
+        uploadedPaths.push(artworkPath);
+      }
+
+      formData.delete("audio");
+      formData.delete("artwork");
+      formData.set("audio_path", audioPath);
+      if (artworkPath) formData.set("artwork_path", artworkPath);
+
+      startTransition(() => {
+        formAction(formData);
+      });
+    } catch {
+      await supabase.storage.from("songs").remove(uploadedPaths);
+      setClientError("Upload failed. Please try again.");
+    } finally {
+      setStoringFiles(false);
+    }
   }
 
   return (
@@ -132,21 +183,25 @@ export function UploadForm() {
         />
       </div>
 
-      {state.error && <p className="text-sm text-red-400">{state.error}</p>}
+      {(clientError || state.error) && (
+        <p className="text-sm text-red-400">{clientError || state.error}</p>
+      )}
       {state.success && (
         <p className="text-sm text-accent">Song uploaded successfully.</p>
       )}
 
       <button
         type="submit"
-        disabled={transcoding || pending}
+        disabled={transcoding || storingFiles || pending}
         className="rounded-full bg-accent px-5 py-2 font-medium text-accent-ink shadow-[0_0_30px_-8px_var(--accent-glow)] transition-colors hover:bg-accent-strong disabled:opacity-40"
       >
         {transcoding
           ? `Preparing your song... ${Math.round(transcodeProgress * 100)}%`
-          : pending
+          : storingFiles
             ? "Uploading..."
-            : "Upload song"}
+            : pending
+              ? "Saving..."
+              : "Upload song"}
       </button>
     </form>
   );

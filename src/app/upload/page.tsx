@@ -15,7 +15,7 @@ export default async function UploadPage() {
   return (
     <main className="flex flex-1 flex-col items-center gap-8 px-6 py-16">
       <h1 className="font-display text-3xl text-foreground">Upload a song</h1>
-      <UploadForm />
+      <UploadForm userId={user.id} />
     </main>
   );
 }
